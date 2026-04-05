@@ -3,6 +3,7 @@ import pandas as pd
 import requests
 from datetime import datetime
 import altair as alt
+import math
 
 TEAM_CODE = "SJS"
 TEAM_NAME = "San Jose Sharks"
@@ -83,12 +84,23 @@ def format_pct(value):
 
 
 def season_label(season_id):
-    if not season_id:
+    if season_id is None:
         return "Unknown"
-    season_id = str(int(season_id))
-    if len(season_id) == 8:
-        return f"{season_id[:4]}-{season_id[4:6]}"
-    return season_id
+
+    try:
+        if pd.isna(season_id):
+            return "Unknown"
+    except Exception:
+        pass
+
+    try:
+        season_id_str = str(int(float(season_id)))
+    except Exception:
+        season_id_str = str(season_id).strip()
+
+    if len(season_id_str) == 8 and season_id_str.isdigit():
+        return f"{season_id_str[:4]}-{season_id_str[4:6]}"
+    return season_id_str if season_id_str else "Unknown"
 
 
 def build_roster_df(roster_json):
@@ -371,7 +383,7 @@ def extract_best_season_stats(landing_json):
         if any(v is not None for v in [games, goals, assists, points]):
             season_rows.append(
                 {
-                    "Season ID": int(season_id) if season_id is not None else None,
+                    "Season ID": season_id,
                     "Games": games,
                     "Goals": goals,
                     "Assists": assists,
@@ -390,10 +402,16 @@ def extract_best_season_stats(landing_json):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    if "Season ID" in df.columns:
+        df["Season Label"] = df["Season ID"].apply(season_label)
+    else:
+        df["Season Label"] = "Unknown"
+
     df["PPG"] = (df["Points"] / df["Games"]).round(2)
     df = df.sort_values(["Points", "PPG", "Goals"], ascending=False, na_position="last")
     best = df.iloc[0].to_dict()
-    best["Season Label"] = season_label(best.get("Season ID"))
+    if not best.get("Season Label"):
+        best["Season Label"] = season_label(best.get("Season ID"))
     return best
 
 
