@@ -9,7 +9,7 @@ TEAM_NAME = "San Jose Sharks"
 BASE_URL = "https://api-web.nhle.com/v1"
 FULL_SCHEDULE_URL = "https://www.nhl.com/sharks/schedule"
 
-st.set_page_config(page_title="San Jose Sharks", page_icon="🦈", layout="wide")
+st.set_page_config(page_title="San Jose Sharks", page_icon="https://assets.nhle.com/logos/nhl/svg/SJS_light.svg", layout="wide")
 
 
 @st.cache_data(ttl=900)
