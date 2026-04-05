@@ -39,6 +39,25 @@ def get_club_stats():
     return fetch_json(f"{BASE_URL}/club-stats/{TEAM_CODE}/now")
 
 
+def first_present(d, *keys):
+    for key in keys:
+        if isinstance(d, dict) and key in d and d.get(key) is not None:
+            return d.get(key)
+    return None
+
+
+def format_pct(value):
+    if value is None or value == "":
+        return None
+    try:
+        value = float(value)
+        if value <= 1:
+            return round(value, 3)
+        return round(value, 1)
+    except Exception:
+        return value
+
+
 def build_roster_df(roster_json):
     rows = []
 
@@ -206,25 +225,39 @@ def build_goalies_df(club_stats_json, roster_json):
     for g in club_stats_json.get("goalies", []):
         first = g.get("firstName", {}).get("default", "")
         last = g.get("lastName", {}).get("default", "")
-        gp = g.get("gamesPlayed")
-        wins = g.get("wins")
-        losses = g.get("losses")
-        otl = g.get("otLosses")
-        shots_against = g.get("shotsAgainst")
-        saves = g.get("saves")
+
+        otl = first_present(
+            g,
+            "otLosses",
+            "overtimeLosses",
+            "otl",
+            "lossesOt",
+            "lossesInOt",
+        )
+
+        save_pct = format_pct(
+            first_present(
+                g,
+                "savePct",
+                "savePctg",
+                "savePercentage",
+                "svPct",
+                "svPercentage",
+            )
+        )
 
         stat_rows.append(
             {
                 "Goalie": f"{first} {last}".strip(),
-                "Games": gp,
-                "Wins": wins,
-                "Losses": losses,
+                "Games": first_present(g, "gamesPlayed", "gp"),
+                "Wins": first_present(g, "wins", "w"),
+                "Losses": first_present(g, "losses", "l"),
                 "OTL": otl,
-                "Save %": g.get("savePct"),
-                "GAA": g.get("goalsAgainstAverage"),
-                "Shutouts": g.get("shutouts"),
-                "Shots Against": shots_against,
-                "Saves": saves,
+                "Save %": save_pct,
+                "GAA": first_present(g, "goalsAgainstAverage", "gaa"),
+                "Shutouts": first_present(g, "shutouts", "so"),
+                "Shots Against": first_present(g, "shotsAgainst", "sa"),
+                "Saves": first_present(g, "saves", "sv"),
             }
         )
 
@@ -238,8 +271,11 @@ def build_goalies_df(club_stats_json, roster_json):
         df = stats_df.copy()
 
     if not df.empty:
+        if "OTL" in df.columns:
+            df["OTL"] = df["OTL"].fillna(0)
         if "Wins" in df.columns:
             df = df.sort_values(["Wins", "Save %"], ascending=False, na_position="last")
+
         display_cols = [
             "Goalie", "Number", "Catches", "Games", "Wins", "Losses", "OTL",
             "Save %", "GAA", "Shutouts", "Shots Against", "Saves"
@@ -384,4 +420,3 @@ with tab4:
         st.warning("No roster data available.")
 
 st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
