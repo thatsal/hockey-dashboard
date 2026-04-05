@@ -2,11 +2,12 @@ import streamlit as st
 import pandas as pd
 import requests
 from datetime import datetime
+import altair as alt
 
 TEAM_CODE = "SJS"
 TEAM_NAME = "San Jose Sharks"
 BASE_URL = "https://api-web.nhle.com/v1"
-
+FULL_SCHEDULE_URL = "https://www.nhl.com/sharks/schedule"
 
 st.set_page_config(page_title="San Jose Sharks", page_icon="🦈", layout="wide")
 
@@ -77,19 +78,33 @@ def build_schedule_df(schedule_json):
         state = g.get("gameState")
 
         is_sharks_home = home.get("abbrev") == TEAM_CODE
-        opponent = away.get("placeName", {}).get("default") if is_sharks_home else home.get("placeName", {}).get("default")
+        opponent = (
+            away.get("placeName", {}).get("default")
+            if is_sharks_home
+            else home.get("placeName", {}).get("default")
+        )
         matchup = f"{away.get('abbrev')} @ {home.get('abbrev')}"
         sharks_score = home.get("score") if is_sharks_home else away.get("score")
         opp_score = away.get("score") if is_sharks_home else home.get("score")
 
+        result = None
+        if sharks_score is not None and opp_score is not None:
+            if sharks_score > opp_score:
+                result = "Win"
+            elif sharks_score < opp_score:
+                result = "Loss"
+            else:
+                result = "Tie"
+
         rows.append(
             {
-                "Date": game_date,
+                "Date": pd.to_datetime(game_date),
                 "Matchup": matchup,
                 "Opponent": opponent,
                 "Home/Away": "Home" if is_sharks_home else "Away",
                 "Sharks Score": sharks_score,
                 "Opponent Score": opp_score,
+                "Result": result,
                 "State": state,
                 "Venue": venue,
             }
@@ -97,7 +112,6 @@ def build_schedule_df(schedule_json):
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date")
     return df
 
@@ -118,6 +132,16 @@ def extract_sharks_standing(standings_json):
                 "League Rank": team.get("leagueSequence"),
             }
     return None
+
+
+def extract_team_summary(club_stats_json):
+    summary = club_stats_json.get("team", {})
+    return {
+        "Goals For": summary.get("goalsFor"),
+        "Goals Against": summary.get("goalsAgainst"),
+        "Goal Diff": summary.get("goalDifferential"),
+        "Shots/Game": summary.get("shotsPerGame"),
+    }
 
 
 def build_skaters_df(club_stats_json):
@@ -195,6 +219,7 @@ with st.spinner("Loading Sharks data..."):
 roster_df = build_roster_df(roster_json)
 schedule_df = build_schedule_df(schedule_json)
 standing = extract_sharks_standing(standings_json)
+team_summary = extract_team_summary(club_stats_json)
 skaters_df = build_skaters_df(club_stats_json)
 goalies_df = build_goalies_df(club_stats_json)
 
@@ -206,42 +231,74 @@ if standing:
     c4.metric("Conference Rank", standing["Conference Rank"])
     c5.metric("League Rank", standing["League Rank"])
 
+c6, c7, c8, c9 = st.columns(4)
+c6.metric("Goals For", team_summary["Goals For"])
+c7.metric("Goals Against", team_summary["Goals Against"])
+c8.metric("Goal Diff", team_summary["Goal Diff"])
+c9.metric("Shots/Game", team_summary["Shots/Game"])
+
 tab1, tab2, tab3, tab4 = st.tabs(["Schedule", "Skaters", "Goalies", "Roster"])
 
 with tab1:
-    st.subheader("Season Schedule")
+    st.subheader("Upcoming Games")
     if not schedule_df.empty:
-        st.dataframe(schedule_df, use_container_width=True)
+        upcoming = schedule_df[schedule_df["Sharks Score"].isna()].copy()
+        upcoming = upcoming.sort_values("Date").head(6)
+
+        if not upcoming.empty:
+            display_upcoming = upcoming[["Date", "Matchup", "Opponent", "Home/Away", "Venue"]].copy()
+            display_upcoming["Date"] = display_upcoming["Date"].dt.strftime("%Y-%m-%d")
+            st.dataframe(display_upcoming, use_container_width=True)
+        else:
+            st.info("No upcoming games found.")
+
+        st.markdown(f"👉 [View Full Schedule]({FULL_SCHEDULE_URL})")
 
         completed = schedule_df.dropna(subset=["Sharks Score", "Opponent Score"]).copy()
         if not completed.empty:
-            completed["Result"] = completed.apply(
-                lambda x: "Win" if x["Sharks Score"] > x["Opponent Score"] else "Loss",
-                axis=1
-            )
             st.subheader("Sharks Goals by Game")
-            chart_df = completed.set_index("Date")[["Sharks Score", "Opponent Score"]]
-            import altair as alt
 
-            chart_data = completed.set_index("Date").reset_index()
+            line_data = completed.melt(
+                id_vars=["Date", "Opponent", "Result", "Sharks Score", "Opponent Score"],
+                value_vars=["Sharks Score", "Opponent Score"],
+                var_name="Team",
+                value_name="Goals",
+            )
 
-            chart = alt.Chart(chart_data).transform_fold(
-                ["Sharks Score", "Opponent Score"],
-                as_=["Team", "Goals"]
-            ).mark_line(point=True).encode(
+            lines = alt.Chart(line_data).mark_line().encode(
                 x=alt.X("Date:T", title="Date"),
                 y=alt.Y("Goals:Q", title="Goals"),
                 color=alt.Color(
                     "Team:N",
                     scale=alt.Scale(
                         domain=["Sharks Score", "Opponent Score"],
-                        range=["#006D75", "#999999"]  # 🦈 teal + gray
+                        range=["#006D75", "#999999"]
                     ),
-                    legend=alt.Legend(title="Team")
-                )
+                    legend=alt.Legend(title="Team"),
+                ),
             )
 
-            st.altair_chart(chart, use_container_width=True)
+            sharks_points = alt.Chart(completed).mark_circle(size=95).encode(
+                x=alt.X("Date:T"),
+                y=alt.Y("Sharks Score:Q"),
+                color=alt.Color(
+                    "Result:N",
+                    scale=alt.Scale(
+                        domain=["Win", "Loss", "Tie"],
+                        range=["#19c37d", "#ef4444", "#f59e0b"]
+                    ),
+                    legend=alt.Legend(title="Result"),
+                ),
+                tooltip=[
+                    alt.Tooltip("Date:T", title="Date"),
+                    alt.Tooltip("Opponent:N", title="Opponent"),
+                    alt.Tooltip("Sharks Score:Q", title="Sharks"),
+                    alt.Tooltip("Opponent Score:Q", title="Opponent"),
+                    alt.Tooltip("Result:N", title="Result"),
+                ],
+            )
+
+            st.altair_chart(lines + sharks_points, use_container_width=True)
     else:
         st.warning("No schedule data available.")
 
@@ -249,8 +306,6 @@ with tab2:
     st.subheader("Skater Stats")
     if not skaters_df.empty:
         st.dataframe(skaters_df, use_container_width=True)
-
-        import altair as alt
 
         st.subheader("Top 10 Scorers")
 
@@ -261,7 +316,7 @@ with tab2:
 
         chart = alt.Chart(top_df).mark_bar().encode(
             x=alt.X("Points:Q", title="Points"),
-            y=alt.Y("Player:N", sort="-x", title="Player")  # 🔥 forces correct order
+            y=alt.Y("Player:N", sort="-x", title="Player")
         )
 
         st.altair_chart(chart, use_container_width=True)
@@ -283,3 +338,4 @@ with tab4:
         st.warning("No roster data available.")
 
 st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
