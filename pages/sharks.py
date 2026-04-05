@@ -9,6 +9,13 @@ TEAM_NAME = "San Jose Sharks"
 BASE_URL = "https://api-web.nhle.com/v1"
 FULL_SCHEDULE_URL = "https://www.nhl.com/sharks/schedule"
 
+LEGACY_PLAYERS = {
+    "Patrick Marleau": 8466139,
+    "Joe Thornton": 8466138,
+    "Joe Pavelski": 8470794,
+    "Logan Couture": 8471709,
+}
+
 st.set_page_config(page_title="San Jose Sharks", page_icon="🦈", layout="wide")
 
 
@@ -17,6 +24,16 @@ def fetch_json(url: str):
     r = requests.get(url, timeout=20)
     r.raise_for_status()
     return r.json()
+
+
+@st.cache_data(ttl=900)
+def fetch_json_safe(url: str):
+    try:
+        r = requests.get(url, timeout=20)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
 
 
 @st.cache_data(ttl=3600)
@@ -37,6 +54,11 @@ def get_standings():
 @st.cache_data(ttl=900)
 def get_club_stats():
     return fetch_json(f"{BASE_URL}/club-stats/{TEAM_CODE}/now")
+
+
+@st.cache_data(ttl=3600)
+def get_player_landing(player_id: int):
+    return fetch_json_safe(f"{BASE_URL}/player/{player_id}/landing")
 
 
 def first_present(d, *keys):
@@ -190,6 +212,7 @@ def build_skaters_df(club_stats_json):
         rows.append(
             {
                 "Player": f"{first} {last}".strip(),
+                "Player ID": first_present(p, "playerId", "id"),
                 "Games": p.get("gamesPlayed"),
                 "Goals": goals,
                 "Assists": assists,
@@ -264,7 +287,6 @@ def build_goalies_df(club_stats_json, roster_json):
     stats_df = pd.DataFrame(stat_rows)
 
     if not roster_df.empty and not stats_df.empty:
-        # Outer merge keeps current roster goalies and any extra goalies that still have season stats.
         df = roster_df.merge(stats_df, on="Goalie", how="outer")
     elif not roster_df.empty:
         df = roster_df.copy()
@@ -285,6 +307,92 @@ def build_goalies_df(club_stats_json, roster_json):
         ]
         df = df[[c for c in display_cols if c in df.columns]]
     return df
+
+
+def parse_landing_totals(landing_json):
+    if not landing_json:
+        return None
+
+    featured = landing_json.get("featuredStats", {})
+    candidates = [
+        first_present(featured, "regularSeason"),
+        first_present(featured, "career"),
+        landing_json.get("careerTotals"),
+        first_present(landing_json, "regularSeason", "seasonTotals"),
+    ]
+
+    def flatten_stats(obj):
+        if isinstance(obj, dict):
+            for key in ["subSeason", "career", "regularSeason"]:
+                if isinstance(obj.get(key), dict):
+                    maybe = flatten_stats(obj.get(key))
+                    if maybe:
+                        return maybe
+            gp = first_present(obj, "gamesPlayed", "gp")
+            goals = first_present(obj, "goals", "g")
+            assists = first_present(obj, "assists", "a")
+            points = first_present(obj, "points", "pts")
+            pim = first_present(obj, "pim")
+            shots = first_present(obj, "shots", "sog")
+            if any(v is not None for v in [gp, goals, assists, points, pim, shots]):
+                return {
+                    "Games": gp,
+                    "Goals": goals,
+                    "Assists": assists,
+                    "Points": points,
+                    "PIM": pim,
+                    "Shots": shots,
+                }
+        return None
+
+    for candidate in candidates:
+        stats = flatten_stats(candidate)
+        if stats:
+            return stats
+
+    return None
+
+
+def get_current_player_options(skaters_df):
+    if skaters_df.empty:
+        return {}
+    temp = skaters_df.dropna(subset=["Player ID"]).copy()
+    return dict(zip(temp["Player"], temp["Player ID"]))
+
+
+def build_compare_chart(left_name, right_name, left_stats, right_stats):
+    rows = []
+    for stat in ["Games", "Goals", "Assists", "Points", "Shots", "PIM"]:
+        left_val = left_stats.get(stat)
+        right_val = right_stats.get(stat)
+        if left_val is not None:
+            rows.append({"Player": left_name, "Stat": stat, "Value": left_val})
+        if right_val is not None:
+            rows.append({"Player": right_name, "Stat": stat, "Value": right_val})
+
+    if not rows:
+        return None
+
+    chart_df = pd.DataFrame(rows)
+    return alt.Chart(chart_df).mark_bar().encode(
+        x=alt.X("Stat:N", title="Stat"),
+        y=alt.Y("Value:Q", title="Value"),
+        color=alt.Color("Player:N", title="Player"),
+        xOffset="Player:N",
+        tooltip=["Player", "Stat", "Value"],
+    )
+
+
+def render_stat_card(title, stats):
+    st.markdown(f"### {title}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Games", stats.get("Games"))
+    c2.metric("Goals", stats.get("Goals"))
+    c3.metric("Assists", stats.get("Assists"))
+    c4, c5, c6 = st.columns(3)
+    c4.metric("Points", stats.get("Points"))
+    c5.metric("Shots", stats.get("Shots"))
+    c6.metric("PIM", stats.get("PIM"))
 
 
 col1, col2 = st.columns([1, 6])
@@ -310,6 +418,7 @@ standing = extract_sharks_standing(standings_json)
 team_summary = build_team_summary_from_schedule(schedule_df)
 skaters_df = build_skaters_df(club_stats_json)
 goalies_df = build_goalies_df(club_stats_json, roster_json)
+current_player_options = get_current_player_options(skaters_df)
 
 if standing:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -325,7 +434,7 @@ c7.metric("Goals Against", team_summary["Goals Against"])
 c8.metric("Goal Diff", team_summary["Goal Diff"])
 c9.metric("Goals/Game", team_summary["Goals/Game"])
 
-tab1, tab2, tab3, tab4 = st.tabs(["Schedule", "Skaters", "Goalies", "Roster"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Schedule", "Skaters", "Goalies", "Roster", "Compare"])
 
 with tab1:
     st.subheader("Upcoming Games")
@@ -390,7 +499,8 @@ with tab1:
 with tab2:
     st.subheader("Skater Stats")
     if not skaters_df.empty:
-        st.dataframe(skaters_df, use_container_width=True)
+        display_skaters = skaters_df.drop(columns=["Player ID"], errors="ignore")
+        st.dataframe(display_skaters, use_container_width=True)
 
         st.subheader("Top 10 Scorers")
 
@@ -422,5 +532,52 @@ with tab4:
     else:
         st.warning("No roster data available.")
 
-st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+with tab5:
+    st.subheader("Current Shark vs Sharks Legend")
 
+    if not current_player_options:
+        st.warning("No current skater options available for comparison.")
+    else:
+        left_col, right_col = st.columns(2)
+        with left_col:
+            current_name = st.selectbox("Current Shark", list(current_player_options.keys()), index=0)
+        with right_col:
+            legacy_name = st.selectbox("Sharks Legend", list(LEGACY_PLAYERS.keys()), index=0)
+
+        current_stats_row = skaters_df.loc[skaters_df["Player"] == current_name].iloc[0].to_dict()
+        current_stats = {
+            "Games": current_stats_row.get("Games"),
+            "Goals": current_stats_row.get("Goals"),
+            "Assists": current_stats_row.get("Assists"),
+            "Points": current_stats_row.get("Points"),
+            "Shots": current_stats_row.get("Shots"),
+            "PIM": current_stats_row.get("PIM"),
+        }
+
+        current_player_id = int(current_player_options[current_name])
+        legacy_player_id = int(LEGACY_PLAYERS[legacy_name])
+        current_landing = get_player_landing(current_player_id)
+        legacy_landing = get_player_landing(legacy_player_id)
+
+        legacy_stats = parse_landing_totals(legacy_landing)
+
+        if legacy_stats is None:
+            st.warning("Legacy player data did not load from the NHL player endpoint.")
+        else:
+            compare_left, compare_right = st.columns(2)
+            with compare_left:
+                render_stat_card(f"{current_name} — Current Season", current_stats)
+            with compare_right:
+                render_stat_card(f"{legacy_name} — Career Totals", legacy_stats)
+
+            chart = build_compare_chart(
+                f"{current_name} (Season)",
+                f"{legacy_name} (Career)",
+                current_stats,
+                legacy_stats
+            )
+            if chart is not None:
+                st.subheader("Side-by-Side Comparison")
+                st.altair_chart(chart, use_container_width=True)
+
+            st.caption("This first version compares the selected current Shark's current season to the selected legend's career totals. Next step can normalize to rookie season or first X games.")
