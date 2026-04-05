@@ -221,7 +221,28 @@ with tab1:
             )
             st.subheader("Sharks Goals by Game")
             chart_df = completed.set_index("Date")[["Sharks Score", "Opponent Score"]]
-            st.line_chart(chart_df)
+            import altair as alt
+
+            chart_data = completed.set_index("Date").reset_index()
+
+            chart = alt.Chart(chart_data).transform_fold(
+                ["Sharks Score", "Opponent Score"],
+                as_=["Team", "Goals"]
+            ).mark_line(point=True).encode(
+                x=alt.X("Date:T", title="Date"),
+                y=alt.Y("Goals:Q", title="Goals"),
+                color=alt.Color(
+                    "Team:N",
+                    scale=alt.Scale(
+                        domain=["Sharks Score", "Opponent Score"],
+                        range=["#006D75", "#999999"]  # 🦈 teal + gray
+                    ),
+                    legend=alt.Legend(title="Team")
+                )
+            )
+
+            st.line_chart  # remove this line if still there
+            st.altair_chart(chart, use_container_width=True)
     else:
         st.warning("No schedule data available.")
 
