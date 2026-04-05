@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -15,6 +16,8 @@ LEGACY_PLAYERS = {
     "Joe Pavelski": 8470794,
     "Logan Couture": 8471709,
 }
+
+CURRENT_SEASON_ID = 20252026
 
 st.set_page_config(page_title="San Jose Sharks", page_icon="🦈", layout="wide")
 
@@ -61,11 +64,6 @@ def get_player_landing(player_id: int):
     return fetch_json_safe(f"{BASE_URL}/player/{player_id}/landing")
 
 
-@st.cache_data(ttl=3600)
-def get_player_game_log(player_id: int, season_id: int, game_type: int = 2):
-    return fetch_json_safe(f"{BASE_URL}/player/{player_id}/game-log/{season_id}/{game_type}")
-
-
 def first_present(d, *keys):
     for key in keys:
         if isinstance(d, dict) and key in d and d.get(key) is not None:
@@ -83,6 +81,15 @@ def format_pct(value):
         return round(value, 1)
     except Exception:
         return value
+
+
+def season_label(season_id):
+    if not season_id:
+        return "Unknown"
+    season_id = str(int(season_id))
+    if len(season_id) == 8:
+        return f"{season_id[:4]}-{season_id[4:6]}"
+    return season_id
 
 
 def build_roster_df(roster_json):
@@ -213,15 +220,18 @@ def build_skaters_df(club_stats_json):
         last = p.get("lastName", {}).get("default", "")
         goals = p.get("goals", 0)
         assists = p.get("assists", 0)
+        games = p.get("gamesPlayed", 0)
+        points = goals + assists
 
         rows.append(
             {
                 "Player": f"{first} {last}".strip(),
                 "Player ID": first_present(p, "playerId", "id"),
-                "Games": p.get("gamesPlayed"),
+                "Games": games,
                 "Goals": goals,
                 "Assists": assists,
-                "Points": goals + assists,
+                "Points": points,
+                "PPG": round(points / games, 2) if games else None,
                 "Plus/Minus": p.get("plusMinus"),
                 "PIM": p.get("pim"),
                 "Shots": p.get("shots"),
@@ -314,96 +324,6 @@ def build_goalies_df(club_stats_json, roster_json):
     return df
 
 
-def extract_regular_season_ids(landing_json):
-    season_ids = set()
-
-    if not landing_json:
-        return []
-
-    for key in ["seasonTotals", "careerTotals", "regularSeasonStats"]:
-        value = landing_json.get(key)
-        if isinstance(value, list):
-            for row in value:
-                game_type = first_present(row, "gameTypeId", "gameType")
-                season_id = first_present(row, "season", "seasonId")
-                if season_id is not None and (game_type in [None, 2, "2", "R"]):
-                    season_ids.add(int(season_id))
-
-    featured = landing_json.get("featuredStats", {})
-    if isinstance(featured, dict):
-        for subkey in ["regularSeason", "career"]:
-            block = featured.get(subkey)
-            if isinstance(block, dict):
-                season_id = first_present(block, "season", "seasonId")
-                if season_id is not None:
-                    season_ids.add(int(season_id))
-                for nested_key in ["subSeason", "career", "regularSeason"]:
-                    nested = block.get(nested_key)
-                    if isinstance(nested, dict):
-                        season_id = first_present(nested, "season", "seasonId")
-                        if season_id is not None:
-                            season_ids.add(int(season_id))
-
-    return sorted(season_ids)
-
-
-def parse_game_log_rows(game_log_json):
-    if game_log_json is None:
-        return []
-
-    if isinstance(game_log_json, list):
-        raw_rows = game_log_json
-    else:
-        raw_rows = first_present(game_log_json, "gameLog", "games", "playerGameLog")
-        if raw_rows is None and isinstance(game_log_json, dict):
-            raw_rows = []
-
-    rows = []
-    for row in raw_rows or []:
-        game_date = first_present(row, "gameDate", "date")
-        rows.append(
-            {
-                "Date": pd.to_datetime(game_date) if game_date else pd.NaT,
-                "Goals": first_present(row, "goals", "g", "playerGoals"),
-                "Assists": first_present(row, "assists", "a", "playerAssists"),
-                "Points": first_present(row, "points", "pts"),
-                "Shots": first_present(row, "shots", "sog", "shotsOnGoal"),
-                "PIM": first_present(row, "pim", "penaltyMinutes"),
-            }
-        )
-    return rows
-
-
-def build_first_x_games_stats(player_id, x_games):
-    landing = get_player_landing(player_id)
-    season_ids = extract_regular_season_ids(landing)
-
-    all_rows = []
-    for season_id in season_ids:
-        log_json = get_player_game_log(player_id, season_id, 2)
-        all_rows.extend(parse_game_log_rows(log_json))
-
-    if not all_rows:
-        return None
-
-    df = pd.DataFrame(all_rows)
-    if df.empty:
-        return None
-
-    df = df.sort_values("Date", na_position="last").head(int(x_games))
-
-    return {
-        "Games": int(len(df)),
-        "Goals": int(pd.to_numeric(df["Goals"], errors="coerce").fillna(0).sum()),
-        "Assists": int(pd.to_numeric(df["Assists"], errors="coerce").fillna(0).sum()),
-        "Points": int(pd.to_numeric(df["Points"], errors="coerce").fillna(0).sum()),
-        "Shots": int(pd.to_numeric(df["Shots"], errors="coerce").fillna(0).sum()),
-        "PIM": int(pd.to_numeric(df["PIM"], errors="coerce").fillna(0).sum()),
-        "Window Label": f"First {int(len(df))} NHL games",
-        "Games Available": int(len(df)),
-    }
-
-
 def get_current_player_options(skaters_df):
     if skaters_df.empty:
         return {}
@@ -411,9 +331,76 @@ def get_current_player_options(skaters_df):
     return dict(zip(temp["Player"], temp["Player ID"]))
 
 
+def extract_best_season_stats(landing_json):
+    if not landing_json:
+        return None
+
+    candidates = []
+    for key in ["seasonTotals", "careerTotals", "regularSeasonStats"]:
+        val = landing_json.get(key)
+        if isinstance(val, list):
+            candidates.extend(val)
+
+    featured = landing_json.get("featuredStats", {})
+    for block_name in ["regularSeason", "career"]:
+        block = featured.get(block_name)
+        if isinstance(block, dict):
+            for nested_name in ["subSeason", "career", "regularSeason"]:
+                nested = block.get(nested_name)
+                if isinstance(nested, dict):
+                    candidates.append(nested)
+
+    season_rows = []
+    for row in candidates:
+        if not isinstance(row, dict):
+            continue
+        game_type = first_present(row, "gameTypeId", "gameType")
+        if game_type not in [None, 2, "2", "R"]:
+            continue
+
+        goals = first_present(row, "goals", "g")
+        assists = first_present(row, "assists", "a")
+        points = first_present(row, "points", "pts")
+        games = first_present(row, "gamesPlayed", "gp")
+        shots = first_present(row, "shots", "sog")
+        pim = first_present(row, "pim")
+        season_id = first_present(row, "season", "seasonId")
+
+        if points is None and (goals is not None or assists is not None):
+            points = (goals or 0) + (assists or 0)
+
+        if any(v is not None for v in [games, goals, assists, points]):
+            season_rows.append(
+                {
+                    "Season ID": int(season_id) if season_id is not None else None,
+                    "Games": games,
+                    "Goals": goals,
+                    "Assists": assists,
+                    "Points": points,
+                    "Shots": shots,
+                    "PIM": pim,
+                }
+            )
+
+    if not season_rows:
+        return None
+
+    df = pd.DataFrame(season_rows).drop_duplicates()
+
+    for col in ["Games", "Goals", "Assists", "Points", "Shots", "PIM"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df["PPG"] = (df["Points"] / df["Games"]).round(2)
+    df = df.sort_values(["Points", "PPG", "Goals"], ascending=False, na_position="last")
+    best = df.iloc[0].to_dict()
+    best["Season Label"] = season_label(best.get("Season ID"))
+    return best
+
+
 def build_compare_chart(left_name, right_name, left_stats, right_stats):
     rows = []
-    for stat in ["Games", "Goals", "Assists", "Points", "Shots", "PIM"]:
+    for stat in ["Games", "Goals", "Assists", "Points", "PPG", "Shots", "PIM"]:
         left_val = left_stats.get(stat)
         right_val = right_stats.get(stat)
         if left_val is not None:
@@ -434,16 +421,18 @@ def build_compare_chart(left_name, right_name, left_stats, right_stats):
     )
 
 
-def render_stat_card(title, stats):
+def render_stat_card(title, season_text, stats):
     st.markdown(f"### {title}")
-    c1, c2, c3 = st.columns(3)
+    st.caption(season_text)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Games", stats.get("Games"))
     c2.metric("Goals", stats.get("Goals"))
     c3.metric("Assists", stats.get("Assists"))
-    c4, c5, c6 = st.columns(3)
     c4.metric("Points", stats.get("Points"))
-    c5.metric("Shots", stats.get("Shots"))
-    c6.metric("PIM", stats.get("PIM"))
+    c5, c6, c7 = st.columns(3)
+    c5.metric("PPG", stats.get("PPG"))
+    c6.metric("Shots", stats.get("Shots"))
+    c7.metric("PIM", stats.get("PIM"))
 
 
 col1, col2 = st.columns([1, 6])
@@ -584,8 +573,8 @@ with tab4:
         st.warning("No roster data available.")
 
 with tab5:
-    st.subheader("Current Shark vs Sharks Legend")
-    st.caption("Comparison mode: first X NHL games vs first X NHL games. X is set to the current Shark's games played.")
+    st.subheader("2025-26 Current Shark vs Legend's Best Season")
+    st.caption("Current Shark = 2025-26 season. Legend = best regular season by points, no matter what team they played for.")
 
     if not current_player_options:
         st.warning("No current skater options available for comparison.")
@@ -594,43 +583,53 @@ with tab5:
         with left_col:
             current_name = st.selectbox("Current Shark", list(current_player_options.keys()), index=0)
         with right_col:
-            legacy_name = st.selectbox("Sharks Legend", list(LEGACY_PLAYERS.keys()), index=0)
+            legacy_name = st.selectbox("Legend", list(LEGACY_PLAYERS.keys()), index=0)
 
         current_stats_row = skaters_df.loc[skaters_df["Player"] == current_name].iloc[0].to_dict()
-        x_games = int(current_stats_row.get("Games") or 0)
+        current_stats = {
+            "Games": current_stats_row.get("Games"),
+            "Goals": current_stats_row.get("Goals"),
+            "Assists": current_stats_row.get("Assists"),
+            "Points": current_stats_row.get("Points"),
+            "PPG": current_stats_row.get("PPG"),
+            "Shots": current_stats_row.get("Shots"),
+            "PIM": current_stats_row.get("PIM"),
+        }
 
-        if x_games <= 0:
-            st.warning("Selected current player does not have a valid games played value.")
+        legacy_player_id = int(LEGACY_PLAYERS[legacy_name])
+        legacy_landing = get_player_landing(legacy_player_id)
+        legacy_best = extract_best_season_stats(legacy_landing)
+
+        if legacy_best is None:
+            st.warning("Could not load best-season data for the selected legend.")
         else:
-            current_player_id = int(current_player_options[current_name])
-            legacy_player_id = int(LEGACY_PLAYERS[legacy_name])
-
-            current_first_x = build_first_x_games_stats(current_player_id, x_games)
-            legacy_first_x = build_first_x_games_stats(legacy_player_id, x_games)
-
-            if current_first_x is None or legacy_first_x is None:
-                st.warning("Could not load enough game log data for one of the selected players.")
-            else:
-                st.markdown(f"#### Comparison Window: First {x_games} NHL Games")
-
-                compare_left, compare_right = st.columns(2)
-                with compare_left:
-                    render_stat_card(f"{current_name} — First {current_first_x['Games']} NHL Games", current_first_x)
-                with compare_right:
-                    render_stat_card(f"{legacy_name} — First {legacy_first_x['Games']} NHL Games", legacy_first_x)
-
-                chart = build_compare_chart(
+            compare_left, compare_right = st.columns(2)
+            with compare_left:
+                render_stat_card(
                     f"{current_name}",
-                    f"{legacy_name}",
-                    current_first_x,
-                    legacy_first_x
+                    f"Season: {season_label(CURRENT_SEASON_ID)}",
+                    current_stats
                 )
-                if chart is not None:
-                    st.subheader("Side-by-Side Comparison")
-                    st.altair_chart(chart, use_container_width=True)
+            with compare_right:
+                render_stat_card(
+                    f"{legacy_name}",
+                    f"Best season: {legacy_best.get('Season Label', 'Unknown')}",
+                    legacy_best
+                )
 
-                if current_first_x["Games"] != legacy_first_x["Games"]:
-                    st.info(
-                        f"Requested first {x_games} NHL games, but one player only returned "
-                        f"{min(current_first_x['Games'], legacy_first_x['Games'])} games from the endpoint."
-                    )
+            chart = build_compare_chart(
+                current_name,
+                legacy_name,
+                current_stats,
+                legacy_best
+            )
+            if chart is not None:
+                st.subheader("Side-by-Side Comparison")
+                st.altair_chart(chart, use_container_width=True)
+
+            st.caption(
+                f"{current_name} is shown for {season_label(CURRENT_SEASON_ID)} only. "
+                f"{legacy_name} is shown for their highest-point regular season, regardless of team."
+            )
+
+st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
