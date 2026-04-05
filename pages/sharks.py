@@ -241,7 +241,6 @@ with tab1:
                 )
             )
 
-            st.line_chart  # remove this line if still there
             st.altair_chart(chart, use_container_width=True)
     else:
         st.warning("No schedule data available.")
