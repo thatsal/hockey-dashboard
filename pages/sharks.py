@@ -40,22 +40,14 @@ def build_schedule_df(schedule_json):
         is_sharks_home = home.get("abbrev") == TEAM_CODE
         opponent = away.get("placeName", {}).get("default") if is_sharks_home else home.get("placeName", {}).get("default")
 
-        sharks_score = home.get("score") if is_sharks_home else away.get("score")
-        opp_score = away.get("score") if is_sharks_home else home.get("score")
-
-        result = None
-        if sharks_score is not None and opp_score is not None:
-            result = "Win" if sharks_score > opp_score else "Loss"
-
         rows.append(
             {
                 "Date": pd.to_datetime(game_date),
                 "Matchup": f"{away.get('abbrev')} @ {home.get('abbrev')}",
                 "Opponent": opponent,
                 "Home/Away": "Home" if is_sharks_home else "Away",
-                "Sharks Score": sharks_score,
-                "Opponent Score": opp_score,
-                "Result": result,
+                "Sharks Score": home.get("score") if is_sharks_home else away.get("score"),
+                "Opponent Score": away.get("score") if is_sharks_home else home.get("score"),
                 "Venue": venue,
             }
         )
@@ -115,13 +107,10 @@ with tab1:
     completed = schedule_df.dropna(subset=["Sharks Score", "Opponent Score"])
 
     if not completed.empty:
-        st.subheader("Sharks Goals by Game")
-
-        # Lines
-        base = alt.Chart(completed).transform_fold(
+        chart = alt.Chart(completed).transform_fold(
             ["Sharks Score", "Opponent Score"],
             as_=["Team", "Goals"]
-        ).mark_line().encode(
+        ).mark_line(point=True).encode(
             x="Date:T",
             y="Goals:Q",
             color=alt.Color(
@@ -132,22 +121,8 @@ with tab1:
                 )
             )
         )
-
-        # Points colored by win/loss (Sharks only)
-        points = alt.Chart(completed).mark_circle(size=80).encode(
-            x="Date:T",
-            y="Sharks Score:Q",
-            color=alt.Color(
-                "Result:N",
-                scale=alt.Scale(
-                    domain=["Win", "Loss"],
-                    range=["#00FF7F", "#FF4C4C"]
-                )
-            ),
-            tooltip=["Date:T", "Opponent:N", "Sharks Score", "Opponent Score", "Result"]
-        )
-
-        st.altair_chart(base + points, use_container_width=True)
+        st.subheader("Sharks Goals by Game")
+        st.altair_chart(chart, use_container_width=True)
 
 st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
