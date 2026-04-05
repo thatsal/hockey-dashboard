@@ -61,6 +61,11 @@ def get_player_landing(player_id: int):
     return fetch_json_safe(f"{BASE_URL}/player/{player_id}/landing")
 
 
+@st.cache_data(ttl=3600)
+def get_player_game_log(player_id: int, season_id: int, game_type: int = 2):
+    return fetch_json_safe(f"{BASE_URL}/player/{player_id}/game-log/{season_id}/{game_type}")
+
+
 def first_present(d, *keys):
     for key in keys:
         if isinstance(d, dict) and key in d and d.get(key) is not None:
@@ -309,48 +314,94 @@ def build_goalies_df(club_stats_json, roster_json):
     return df
 
 
-def parse_landing_totals(landing_json):
+def extract_regular_season_ids(landing_json):
+    season_ids = set()
+
     if not landing_json:
-        return None
+        return []
+
+    for key in ["seasonTotals", "careerTotals", "regularSeasonStats"]:
+        value = landing_json.get(key)
+        if isinstance(value, list):
+            for row in value:
+                game_type = first_present(row, "gameTypeId", "gameType")
+                season_id = first_present(row, "season", "seasonId")
+                if season_id is not None and (game_type in [None, 2, "2", "R"]):
+                    season_ids.add(int(season_id))
 
     featured = landing_json.get("featuredStats", {})
-    candidates = [
-        first_present(featured, "regularSeason"),
-        first_present(featured, "career"),
-        landing_json.get("careerTotals"),
-        first_present(landing_json, "regularSeason", "seasonTotals"),
-    ]
+    if isinstance(featured, dict):
+        for subkey in ["regularSeason", "career"]:
+            block = featured.get(subkey)
+            if isinstance(block, dict):
+                season_id = first_present(block, "season", "seasonId")
+                if season_id is not None:
+                    season_ids.add(int(season_id))
+                for nested_key in ["subSeason", "career", "regularSeason"]:
+                    nested = block.get(nested_key)
+                    if isinstance(nested, dict):
+                        season_id = first_present(nested, "season", "seasonId")
+                        if season_id is not None:
+                            season_ids.add(int(season_id))
 
-    def flatten_stats(obj):
-        if isinstance(obj, dict):
-            for key in ["subSeason", "career", "regularSeason"]:
-                if isinstance(obj.get(key), dict):
-                    maybe = flatten_stats(obj.get(key))
-                    if maybe:
-                        return maybe
-            gp = first_present(obj, "gamesPlayed", "gp")
-            goals = first_present(obj, "goals", "g")
-            assists = first_present(obj, "assists", "a")
-            points = first_present(obj, "points", "pts")
-            pim = first_present(obj, "pim")
-            shots = first_present(obj, "shots", "sog")
-            if any(v is not None for v in [gp, goals, assists, points, pim, shots]):
-                return {
-                    "Games": gp,
-                    "Goals": goals,
-                    "Assists": assists,
-                    "Points": points,
-                    "PIM": pim,
-                    "Shots": shots,
-                }
+    return sorted(season_ids)
+
+
+def parse_game_log_rows(game_log_json):
+    if game_log_json is None:
+        return []
+
+    if isinstance(game_log_json, list):
+        raw_rows = game_log_json
+    else:
+        raw_rows = first_present(game_log_json, "gameLog", "games", "playerGameLog")
+        if raw_rows is None and isinstance(game_log_json, dict):
+            raw_rows = []
+
+    rows = []
+    for row in raw_rows or []:
+        game_date = first_present(row, "gameDate", "date")
+        rows.append(
+            {
+                "Date": pd.to_datetime(game_date) if game_date else pd.NaT,
+                "Goals": first_present(row, "goals", "g", "playerGoals"),
+                "Assists": first_present(row, "assists", "a", "playerAssists"),
+                "Points": first_present(row, "points", "pts"),
+                "Shots": first_present(row, "shots", "sog", "shotsOnGoal"),
+                "PIM": first_present(row, "pim", "penaltyMinutes"),
+            }
+        )
+    return rows
+
+
+def build_first_x_games_stats(player_id, x_games):
+    landing = get_player_landing(player_id)
+    season_ids = extract_regular_season_ids(landing)
+
+    all_rows = []
+    for season_id in season_ids:
+        log_json = get_player_game_log(player_id, season_id, 2)
+        all_rows.extend(parse_game_log_rows(log_json))
+
+    if not all_rows:
         return None
 
-    for candidate in candidates:
-        stats = flatten_stats(candidate)
-        if stats:
-            return stats
+    df = pd.DataFrame(all_rows)
+    if df.empty:
+        return None
 
-    return None
+    df = df.sort_values("Date", na_position="last").head(int(x_games))
+
+    return {
+        "Games": int(len(df)),
+        "Goals": int(pd.to_numeric(df["Goals"], errors="coerce").fillna(0).sum()),
+        "Assists": int(pd.to_numeric(df["Assists"], errors="coerce").fillna(0).sum()),
+        "Points": int(pd.to_numeric(df["Points"], errors="coerce").fillna(0).sum()),
+        "Shots": int(pd.to_numeric(df["Shots"], errors="coerce").fillna(0).sum()),
+        "PIM": int(pd.to_numeric(df["PIM"], errors="coerce").fillna(0).sum()),
+        "Window Label": f"First {int(len(df))} NHL games",
+        "Games Available": int(len(df)),
+    }
 
 
 def get_current_player_options(skaters_df):
@@ -534,6 +585,7 @@ with tab4:
 
 with tab5:
     st.subheader("Current Shark vs Sharks Legend")
+    st.caption("Comparison mode: first X NHL games vs first X NHL games. X is set to the current Shark's games played.")
 
     if not current_player_options:
         st.warning("No current skater options available for comparison.")
@@ -545,39 +597,40 @@ with tab5:
             legacy_name = st.selectbox("Sharks Legend", list(LEGACY_PLAYERS.keys()), index=0)
 
         current_stats_row = skaters_df.loc[skaters_df["Player"] == current_name].iloc[0].to_dict()
-        current_stats = {
-            "Games": current_stats_row.get("Games"),
-            "Goals": current_stats_row.get("Goals"),
-            "Assists": current_stats_row.get("Assists"),
-            "Points": current_stats_row.get("Points"),
-            "Shots": current_stats_row.get("Shots"),
-            "PIM": current_stats_row.get("PIM"),
-        }
+        x_games = int(current_stats_row.get("Games") or 0)
 
-        current_player_id = int(current_player_options[current_name])
-        legacy_player_id = int(LEGACY_PLAYERS[legacy_name])
-        current_landing = get_player_landing(current_player_id)
-        legacy_landing = get_player_landing(legacy_player_id)
-
-        legacy_stats = parse_landing_totals(legacy_landing)
-
-        if legacy_stats is None:
-            st.warning("Legacy player data did not load from the NHL player endpoint.")
+        if x_games <= 0:
+            st.warning("Selected current player does not have a valid games played value.")
         else:
-            compare_left, compare_right = st.columns(2)
-            with compare_left:
-                render_stat_card(f"{current_name} — Current Season", current_stats)
-            with compare_right:
-                render_stat_card(f"{legacy_name} — Career Totals", legacy_stats)
+            current_player_id = int(current_player_options[current_name])
+            legacy_player_id = int(LEGACY_PLAYERS[legacy_name])
 
-            chart = build_compare_chart(
-                f"{current_name} (Season)",
-                f"{legacy_name} (Career)",
-                current_stats,
-                legacy_stats
-            )
-            if chart is not None:
-                st.subheader("Side-by-Side Comparison")
-                st.altair_chart(chart, use_container_width=True)
+            current_first_x = build_first_x_games_stats(current_player_id, x_games)
+            legacy_first_x = build_first_x_games_stats(legacy_player_id, x_games)
 
-            st.caption("This first version compares the selected current Shark's current season to the selected legend's career totals. Next step can normalize to rookie season or first X games.")
+            if current_first_x is None or legacy_first_x is None:
+                st.warning("Could not load enough game log data for one of the selected players.")
+            else:
+                st.markdown(f"#### Comparison Window: First {x_games} NHL Games")
+
+                compare_left, compare_right = st.columns(2)
+                with compare_left:
+                    render_stat_card(f"{current_name} — First {current_first_x['Games']} NHL Games", current_first_x)
+                with compare_right:
+                    render_stat_card(f"{legacy_name} — First {legacy_first_x['Games']} NHL Games", legacy_first_x)
+
+                chart = build_compare_chart(
+                    f"{current_name}",
+                    f"{legacy_name}",
+                    current_first_x,
+                    legacy_first_x
+                )
+                if chart is not None:
+                    st.subheader("Side-by-Side Comparison")
+                    st.altair_chart(chart, use_container_width=True)
+
+                if current_first_x["Games"] != legacy_first_x["Games"]:
+                    st.info(
+                        f"Requested first {x_games} NHL games, but one player only returned "
+                        f"{min(current_first_x['Games'], legacy_first_x['Games'])} games from the endpoint."
+                    )
