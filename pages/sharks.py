@@ -347,7 +347,7 @@ def extract_season_progression(landing_json):
             continue
 
         game_type = first_present(s, "gameTypeId", "gameType")
-        if game_type not in [None, 2, "2"]:
+        if game_type not in [2, "2"]:
             continue
 
         season_id = first_present(s, "season", "seasonId")
@@ -381,9 +381,14 @@ def extract_season_progression(landing_json):
     if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows).drop_duplicates()
+    df = pd.DataFrame(rows)
+
+    # remove duplicate seasons
+    df = df.drop_duplicates(subset=["Season ID"])
+
     df = df.sort_values("Season ID", na_position="last").reset_index(drop=True)
     df["Career Year"] = range(1, len(df) + 1)
+
     return df
 
 
