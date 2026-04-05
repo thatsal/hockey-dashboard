@@ -230,21 +230,21 @@ with tab2:
     if not skaters_df.empty:
         st.dataframe(skaters_df, use_container_width=True)
 
-import altair as alt
+        import altair as alt
 
-st.subheader("Top 10 Scorers")
+        st.subheader("Top 10 Scorers")
 
-top_df = (
-    skaters_df.sort_values(["Points", "Goals"], ascending=False)
-    .head(10)
-)
+        top_df = (
+            skaters_df.sort_values(["Points", "Goals"], ascending=False)
+            .head(10)
+        )
 
-chart = alt.Chart(top_df).mark_bar().encode(
-    x=alt.X("Points:Q", title="Points"),
-    y=alt.Y("Player:N", sort="-x", title="Player")  # 🔥 forces correct order
-)
+        chart = alt.Chart(top_df).mark_bar().encode(
+            x=alt.X("Points:Q", title="Points"),
+            y=alt.Y("Player:N", sort="-x", title="Player")  # 🔥 forces correct order
+        )
 
-st.altair_chart(chart, use_container_width=True)
+        st.altair_chart(chart, use_container_width=True)
     else:
         st.warning("No skater stats available.")
 
