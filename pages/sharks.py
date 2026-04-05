@@ -175,7 +175,16 @@ def build_goalies_df(club_stats_json):
     return df
 
 
-st.title("🦈 San Jose Sharks Dashboard")
+col1, col2 = st.columns([1, 6])
+
+with col1:
+    st.image("https://assets.nhle.com/logos/nhl/svg/SJS_light.svg", width=100)
+
+with col2:
+    st.markdown(
+        "<h1 style='margin-bottom: 0;'>San Jose Sharks Dashboard</h1>",
+        unsafe_allow_html=True
+    )
 
 with st.spinner("Loading Sharks data..."):
     roster_json = get_roster()
