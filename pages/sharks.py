@@ -9,7 +9,7 @@ TEAM_NAME = "San Jose Sharks"
 BASE_URL = "https://api-web.nhle.com/v1"
 FULL_SCHEDULE_URL = "https://www.nhl.com/sharks/schedule"
 
-st.set_page_config(page_title="San Jose Sharks", page_icon="https://assets.nhle.com/logos/nhl/svg/SJS_light.svg", layout="wide")
+st.set_page_config(page_title="San Jose Sharks", page_icon="🦈", layout="wide")
 
 
 @st.cache_data(ttl=900)
@@ -84,14 +84,14 @@ def build_schedule_df(schedule_json):
             else home.get("placeName", {}).get("default")
         )
         matchup = f"{away.get('abbrev')} @ {home.get('abbrev')}"
-        sharks_score = home.get("score") if is_sharks_home else away.get("score")
-        opp_score = away.get("score") if is_sharks_home else home.get("score")
+        goals_for = home.get("score") if is_sharks_home else away.get("score")
+        goals_against = away.get("score") if is_sharks_home else home.get("score")
 
         result = None
-        if sharks_score is not None and opp_score is not None:
-            if sharks_score > opp_score:
+        if goals_for is not None and goals_against is not None:
+            if goals_for > goals_against:
                 result = "Win"
-            elif sharks_score < opp_score:
+            elif goals_for < goals_against:
                 result = "Loss"
             else:
                 result = "Tie"
@@ -102,8 +102,8 @@ def build_schedule_df(schedule_json):
                 "Matchup": matchup,
                 "Opponent": opponent,
                 "Home/Away": "Home" if is_sharks_home else "Away",
-                "Sharks Score": sharks_score,
-                "Opponent Score": opp_score,
+                "Goals For": goals_for,
+                "Goals Against": goals_against,
                 "Result": result,
                 "State": state,
                 "Venue": venue,
@@ -134,13 +134,27 @@ def extract_sharks_standing(standings_json):
     return None
 
 
-def extract_team_summary(club_stats_json):
-    summary = club_stats_json.get("team", {})
+def build_team_summary_from_schedule(schedule_df):
+    completed = schedule_df.dropna(subset=["Goals For", "Goals Against"]).copy()
+
+    if completed.empty:
+        return {
+            "Goals For": None,
+            "Goals Against": None,
+            "Goal Diff": None,
+            "Goals/Game": None,
+        }
+
+    goals_for = int(completed["Goals For"].sum())
+    goals_against = int(completed["Goals Against"].sum())
+    games_played = len(completed)
+    goals_per_game = round(goals_for / games_played, 2) if games_played else None
+
     return {
-        "Goals For": summary.get("goalsFor"),
-        "Goals Against": summary.get("goalsAgainst"),
-        "Goal Diff": summary.get("goalDifferential"),
-        "Shots/Game": summary.get("shotsPerGame"),
+        "Goals For": goals_for,
+        "Goals Against": goals_against,
+        "Goal Diff": goals_for - goals_against,
+        "Goals/Game": goals_per_game,
     }
 
 
@@ -173,29 +187,64 @@ def build_skaters_df(club_stats_json):
     return df
 
 
-def build_goalies_df(club_stats_json):
-    goalies = club_stats_json.get("goalies", [])
-    rows = []
-
-    for g in goalies:
-        first = g.get("firstName", {}).get("default", "")
-        last = g.get("lastName", {}).get("default", "")
-        rows.append(
+def build_goalies_df(club_stats_json, roster_json):
+    roster_goalies = []
+    for p in roster_json.get("goalies", []):
+        first = p.get("firstName", {}).get("default", "")
+        last = p.get("lastName", {}).get("default", "")
+        roster_goalies.append(
             {
                 "Goalie": f"{first} {last}".strip(),
-                "Games": g.get("gamesPlayed"),
-                "Wins": g.get("wins"),
-                "Losses": g.get("losses"),
-                "OTL": g.get("otLosses"),
-                "Save %": g.get("savePct"),
-                "GAA": g.get("goalsAgainstAverage"),
-                "Shutouts": g.get("shutouts"),
+                "Number": p.get("sweaterNumber"),
+                "Catches": p.get("shootsCatches"),
             }
         )
 
-    df = pd.DataFrame(rows)
+    roster_df = pd.DataFrame(roster_goalies)
+
+    stat_rows = []
+    for g in club_stats_json.get("goalies", []):
+        first = g.get("firstName", {}).get("default", "")
+        last = g.get("lastName", {}).get("default", "")
+        gp = g.get("gamesPlayed")
+        wins = g.get("wins")
+        losses = g.get("losses")
+        otl = g.get("otLosses")
+        shots_against = g.get("shotsAgainst")
+        saves = g.get("saves")
+
+        stat_rows.append(
+            {
+                "Goalie": f"{first} {last}".strip(),
+                "Games": gp,
+                "Wins": wins,
+                "Losses": losses,
+                "OTL": otl,
+                "Save %": g.get("savePct"),
+                "GAA": g.get("goalsAgainstAverage"),
+                "Shutouts": g.get("shutouts"),
+                "Shots Against": shots_against,
+                "Saves": saves,
+            }
+        )
+
+    stats_df = pd.DataFrame(stat_rows)
+
+    if not roster_df.empty and not stats_df.empty:
+        df = roster_df.merge(stats_df, on="Goalie", how="left")
+    elif not roster_df.empty:
+        df = roster_df.copy()
+    else:
+        df = stats_df.copy()
+
     if not df.empty:
-        df = df.sort_values(["Wins", "Save %"], ascending=False)
+        if "Wins" in df.columns:
+            df = df.sort_values(["Wins", "Save %"], ascending=False, na_position="last")
+        display_cols = [
+            "Goalie", "Number", "Catches", "Games", "Wins", "Losses", "OTL",
+            "Save %", "GAA", "Shutouts", "Shots Against", "Saves"
+        ]
+        df = df[[c for c in display_cols if c in df.columns]]
     return df
 
 
@@ -219,9 +268,9 @@ with st.spinner("Loading Sharks data..."):
 roster_df = build_roster_df(roster_json)
 schedule_df = build_schedule_df(schedule_json)
 standing = extract_sharks_standing(standings_json)
-team_summary = extract_team_summary(club_stats_json)
+team_summary = build_team_summary_from_schedule(schedule_df)
 skaters_df = build_skaters_df(club_stats_json)
-goalies_df = build_goalies_df(club_stats_json)
+goalies_df = build_goalies_df(club_stats_json, roster_json)
 
 if standing:
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -235,14 +284,14 @@ c6, c7, c8, c9 = st.columns(4)
 c6.metric("Goals For", team_summary["Goals For"])
 c7.metric("Goals Against", team_summary["Goals Against"])
 c8.metric("Goal Diff", team_summary["Goal Diff"])
-c9.metric("Shots/Game", team_summary["Shots/Game"])
+c9.metric("Goals/Game", team_summary["Goals/Game"])
 
 tab1, tab2, tab3, tab4 = st.tabs(["Schedule", "Skaters", "Goalies", "Roster"])
 
 with tab1:
     st.subheader("Upcoming Games")
     if not schedule_df.empty:
-        upcoming = schedule_df[schedule_df["Sharks Score"].isna()].copy()
+        upcoming = schedule_df[schedule_df["Goals For"].isna()].copy()
         upcoming = upcoming.sort_values("Date").head(6)
 
         if not upcoming.empty:
@@ -254,51 +303,48 @@ with tab1:
 
         st.markdown(f"👉 [View Full Schedule]({FULL_SCHEDULE_URL})")
 
-        completed = schedule_df.dropna(subset=["Sharks Score", "Opponent Score"]).copy()
+        completed = schedule_df.dropna(subset=["Goals For", "Goals Against"]).copy()
         if not completed.empty:
-            st.subheader("Sharks Goals by Game")
+            st.subheader("Goals For vs Goals Against")
 
-            line_data = completed.melt(
-                id_vars=["Date", "Opponent", "Result", "Sharks Score", "Opponent Score"],
-                value_vars=["Sharks Score", "Opponent Score"],
-                var_name="Team",
-                value_name="Goals",
-            )
-
-            lines = alt.Chart(line_data).mark_line().encode(
+            goals_for_line = alt.Chart(completed).mark_line(
+                color="#006D75",
+                strokeWidth=3
+            ).encode(
                 x=alt.X("Date:T", title="Date"),
-                y=alt.Y("Goals:Q", title="Goals"),
-                color=alt.Color(
-                    "Team:N",
-                    scale=alt.Scale(
-                        domain=["Sharks Score", "Opponent Score"],
-                        range=["#006D75", "#999999"]
-                    ),
-                    legend=alt.Legend(title="Team"),
-                ),
+                y=alt.Y("Goals For:Q", title="Goals"),
             )
 
-            sharks_points = alt.Chart(completed).mark_circle(size=95).encode(
+            goals_against_line = alt.Chart(completed).mark_line(
+                color="#D1D5DB",
+                strokeWidth=2
+            ).encode(
                 x=alt.X("Date:T"),
-                y=alt.Y("Sharks Score:Q"),
+                y=alt.Y("Goals Against:Q"),
+            )
+
+            result_points = alt.Chart(completed).mark_circle(size=95).encode(
+                x=alt.X("Date:T"),
+                y=alt.Y("Goals For:Q"),
                 color=alt.Color(
                     "Result:N",
                     scale=alt.Scale(
                         domain=["Win", "Loss", "Tie"],
-                        range=["#19c37d", "#ef4444", "#f59e0b"]
+                        range=["#22C55E", "#EF4444", "#F59E0B"]
                     ),
                     legend=alt.Legend(title="Result"),
                 ),
                 tooltip=[
                     alt.Tooltip("Date:T", title="Date"),
                     alt.Tooltip("Opponent:N", title="Opponent"),
-                    alt.Tooltip("Sharks Score:Q", title="Sharks"),
-                    alt.Tooltip("Opponent Score:Q", title="Opponent"),
+                    alt.Tooltip("Goals For:Q", title="Goals For"),
+                    alt.Tooltip("Goals Against:Q", title="Goals Against"),
                     alt.Tooltip("Result:N", title="Result"),
                 ],
             )
 
-            st.altair_chart(lines + sharks_points, use_container_width=True)
+            st.altair_chart(goals_for_line + goals_against_line + result_points, use_container_width=True)
+            st.caption("Line colors: teal = Goals For, light gray = Goals Against. Dot colors show Win / Loss / Tie.")
     else:
         st.warning("No schedule data available.")
 
