@@ -264,7 +264,8 @@ def build_goalies_df(club_stats_json, roster_json):
     stats_df = pd.DataFrame(stat_rows)
 
     if not roster_df.empty and not stats_df.empty:
-        df = roster_df.merge(stats_df, on="Goalie", how="left")
+        # Outer merge keeps current roster goalies and any extra goalies that still have season stats.
+        df = roster_df.merge(stats_df, on="Goalie", how="outer")
     elif not roster_df.empty:
         df = roster_df.copy()
     else:
@@ -273,8 +274,10 @@ def build_goalies_df(club_stats_json, roster_json):
     if not df.empty:
         if "OTL" in df.columns:
             df["OTL"] = df["OTL"].fillna(0)
+        if "Goalie" in df.columns:
+            df = df.drop_duplicates(subset=["Goalie"], keep="first")
         if "Wins" in df.columns:
-            df = df.sort_values(["Wins", "Save %"], ascending=False, na_position="last")
+            df = df.sort_values(["Wins", "Games", "Save %"], ascending=False, na_position="last")
 
         display_cols = [
             "Goalie", "Number", "Catches", "Games", "Wins", "Losses", "OTL",
@@ -420,3 +423,4 @@ with tab4:
         st.warning("No roster data available.")
 
 st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
