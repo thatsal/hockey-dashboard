@@ -285,6 +285,34 @@ def season_ids_from_landing(landing_json):
     return sorted(set(ids))
 
 
+def choose_best_season_row(group: pd.DataFrame):
+    numeric_cols = ["Games", "Goals", "Assists", "Points", "Shots", "PIM"]
+    group = group.copy()
+    for col in numeric_cols:
+        group[col] = pd.to_numeric(group[col], errors="coerce").fillna(0)
+
+    if len(group) == 1:
+        return group.iloc[0]
+
+    max_games = group["Games"].max()
+    max_points = group["Points"].max()
+    candidates = group[(group["Games"] == max_games) & (group["Points"] == max_points)]
+    if candidates.empty:
+        candidates = group[group["Points"] == max_points]
+
+    if not candidates.empty:
+        candidate = candidates.iloc[0]
+        other_games = group["Games"].sum() - candidate["Games"]
+        other_points = group["Points"].sum() - candidate["Points"]
+        if candidate["Games"] >= other_games or candidate["Points"] >= other_points:
+            return candidate
+
+    merged = {"Season ID": int(group["Season ID"].iloc[0])}
+    for col in numeric_cols:
+        merged[col] = group[col].sum()
+    return pd.Series(merged)
+
+
 def progression_from_landing(player_id: int):
     landing = get_player_landing(player_id)
     if not landing:
@@ -316,18 +344,16 @@ def progression_from_landing(player_id: int):
     if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows).fillna(0)
+    raw_df = pd.DataFrame(rows)
+    season_rows = []
+    for _, group in raw_df.groupby("Season ID", sort=True):
+        season_rows.append(choose_best_season_row(group))
 
-    df = (
-        df.groupby("Season ID", as_index=False)[["Games", "Goals", "Assists", "Points", "Shots", "PIM"]]
-        .sum()
-        .sort_values("Season ID")
-        .reset_index(drop=True)
-    )
+    df = pd.DataFrame(season_rows).sort_values("Season ID").reset_index(drop=True)
 
     numeric_cols = ["Games", "Goals", "Assists", "Points", "Shots", "PIM"]
     for col in numeric_cols:
-        df[col] = df[col].fillna(0).astype(int)
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
     df["Season"] = df["Season ID"].apply(season_label)
     df["PPG"] = df.apply(lambda r: round(r["Points"] / r["Games"], 2) if r["Games"] else None, axis=1)
@@ -388,6 +414,41 @@ def career_totals_from_progression(progress_df):
     }
     totals["PPG"] = round(totals["Points"] / totals["Games"], 2) if totals["Games"] else None
     return totals
+
+
+def career_totals_from_landing(player_id: int):
+    landing = get_player_landing(player_id)
+    if not landing:
+        return None
+
+    totals = first_present(landing, "careerTotals")
+    if not isinstance(totals, dict):
+        return None
+
+    regular = first_present(totals, "regularSeason")
+    if not isinstance(regular, dict):
+        return None
+
+    games = pd.to_numeric(first_present(regular, "gamesPlayed", "games"), errors="coerce")
+    goals = pd.to_numeric(first_present(regular, "goals", "g"), errors="coerce")
+    assists = pd.to_numeric(first_present(regular, "assists", "a"), errors="coerce")
+    points = pd.to_numeric(first_present(regular, "points", "pts"), errors="coerce")
+    shots = pd.to_numeric(first_present(regular, "shots", "sog"), errors="coerce")
+    pim = pd.to_numeric(first_present(regular, "pim", "penaltyMinutes"), errors="coerce")
+
+    if pd.isna(games) and pd.isna(points):
+        return None
+
+    totals_out = {
+        "Games": int(0 if pd.isna(games) else games),
+        "Goals": int(0 if pd.isna(goals) else goals),
+        "Assists": int(0 if pd.isna(assists) else assists),
+        "Points": int(0 if pd.isna(points) else points),
+        "Shots": None if pd.isna(shots) else int(shots),
+        "PIM": None if pd.isna(pim) else int(pim),
+    }
+    totals_out["PPG"] = round(totals_out["Points"] / totals_out["Games"], 2) if totals_out["Games"] else None
+    return totals_out
 
 
 def build_player_progression(player_id: int):
@@ -556,8 +617,8 @@ with tab5:
         current_progression, current_source = build_player_progression(current_player_id)
         legacy_progression, legacy_source = build_player_progression(legacy_player_id)
 
-        current_career = career_totals_from_progression(current_progression)
-        legacy_career = career_totals_from_progression(legacy_progression)
+        current_career = career_totals_from_landing(current_player_id) or career_totals_from_progression(current_progression)
+        legacy_career = career_totals_from_landing(legacy_player_id) or career_totals_from_progression(legacy_progression)
 
         if current_career is None or legacy_career is None:
             st.warning("Could not load NHL regular-season career totals for one of the selected players.")
