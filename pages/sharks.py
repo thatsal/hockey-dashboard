@@ -526,4 +526,3 @@ with tab5:
                 st.write("Legacy progression rows:", legacy_progression)
 
 st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
