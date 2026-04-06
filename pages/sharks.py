@@ -90,7 +90,7 @@ def season_label(season_id):
     except Exception:
         season_id = str(season_id).strip()
     if len(season_id) == 8 and season_id.isdigit():
-        return f"{season_id[:4]}-{season_id[4:6]}"
+        return f"{season_id[:4]}-{season_id[6:]}"
     return season_id or "Unknown"
 
 
@@ -285,9 +285,13 @@ def season_ids_from_landing(landing_json):
     return sorted(set(ids))
 
 
-def progression_from_landing_totals(landing_json):
-    season_rows = []
-    for row in landing_json.get("seasonTotals", []) if landing_json else []:
+def progression_from_landing(player_id: int):
+    landing = get_player_landing(player_id)
+    if not landing:
+        return pd.DataFrame()
+
+    rows = []
+    for row in landing.get("seasonTotals", []):
         if not isinstance(row, dict):
             continue
 
@@ -295,69 +299,49 @@ def progression_from_landing_totals(landing_json):
         if game_type not in [2, "2"]:
             continue
 
-        league_abbrev = first_present(row, "leagueAbbrev", "league")
-        if league_abbrev not in [None, "NHL"]:
-            continue
-
         season_id = first_present(row, "season", "seasonId")
         if season_id is None:
             continue
 
-        games = pd.to_numeric(first_present(row, "gamesPlayed", "games", "gp"), errors="coerce")
-        goals = pd.to_numeric(first_present(row, "goals", "g"), errors="coerce")
-        assists = pd.to_numeric(first_present(row, "assists", "a"), errors="coerce")
-        points = pd.to_numeric(first_present(row, "points", "pts"), errors="coerce")
-        shots = pd.to_numeric(first_present(row, "shots", "sog", "shotsOnGoal"), errors="coerce")
-        pim = pd.to_numeric(first_present(row, "pim", "penaltyMinutes"), errors="coerce")
-
-        if pd.isna(games) and pd.isna(points) and pd.isna(goals) and pd.isna(assists):
-            continue
-
-        games = int(0 if pd.isna(games) else games)
-        goals = int(0 if pd.isna(goals) else goals)
-        assists = int(0 if pd.isna(assists) else assists)
-        points = int(goals + assists if pd.isna(points) else points)
-        shots = int(0 if pd.isna(shots) else shots)
-        pim = int(0 if pd.isna(pim) else pim)
-
-        season_rows.append({
+        rows.append({
             "Season ID": int(season_id),
-            "Season": season_label(season_id),
-            "Games": games,
-            "Goals": goals,
-            "Assists": assists,
-            "Points": points,
-            "PPG": round(points / games, 2) if games else None,
-            "Shots": shots,
-            "PIM": pim,
+            "Games": pd.to_numeric(first_present(row, "gamesPlayed", "games"), errors="coerce"),
+            "Goals": pd.to_numeric(first_present(row, "goals", "g"), errors="coerce"),
+            "Assists": pd.to_numeric(first_present(row, "assists", "a"), errors="coerce"),
+            "Points": pd.to_numeric(first_present(row, "points", "pts"), errors="coerce"),
+            "Shots": pd.to_numeric(first_present(row, "shots", "sog"), errors="coerce"),
+            "PIM": pd.to_numeric(first_present(row, "pim", "penaltyMinutes"), errors="coerce"),
         })
 
-    if not season_rows:
+    if not rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(season_rows).drop_duplicates(subset=["Season ID"])
-    df = df.sort_values("Season ID").reset_index(drop=True)
+    df = pd.DataFrame(rows).fillna(0)
+
+    df = (
+        df.groupby("Season ID", as_index=False)[["Games", "Goals", "Assists", "Points", "Shots", "PIM"]]
+        .sum()
+        .sort_values("Season ID")
+        .reset_index(drop=True)
+    )
+
+    numeric_cols = ["Games", "Goals", "Assists", "Points", "Shots", "PIM"]
+    for col in numeric_cols:
+        df[col] = df[col].fillna(0).astype(int)
+
+    df["Season"] = df["Season ID"].apply(season_label)
+    df["PPG"] = df.apply(lambda r: round(r["Points"] / r["Games"], 2) if r["Games"] else None, axis=1)
     df["Career Year"] = range(1, len(df) + 1)
     return df
 
 
 def progression_from_game_logs(player_id: int):
     landing = get_player_landing(player_id)
-
-    if not landing:
-        return pd.DataFrame()
-
     season_ids = season_ids_from_landing(landing)
-    if not season_ids:
-        return progression_from_landing_totals(landing)
-
     season_rows = []
 
     for season_id in season_ids:
         log_json = get_player_game_log(player_id, season_id, 2)
-        if not log_json:
-            continue
-
         rows = parse_game_log_rows(log_json)
         if not rows:
             continue
@@ -383,53 +367,12 @@ def progression_from_game_logs(player_id: int):
         })
 
     if not season_rows:
-        return progression_from_landing_totals(landing)
+        return pd.DataFrame()
 
     df = pd.DataFrame(season_rows).drop_duplicates(subset=["Season ID"])
     df = df.sort_values("Season ID").reset_index(drop=True)
     df["Career Year"] = range(1, len(df) + 1)
     return df
-
-
-def fallback_career_from_landing(player_id: int):
-    landing = get_player_landing(player_id)
-    if not landing:
-        return None
-
-    career_totals = landing.get("careerTotals") or {}
-    regular = career_totals.get("regularSeason") or career_totals
-    if not isinstance(regular, dict) or not regular:
-        return None
-
-    games = first_present(regular, "gamesPlayed", "games")
-    goals = first_present(regular, "goals", "g")
-    assists = first_present(regular, "assists", "a")
-    points = first_present(regular, "points", "pts")
-    shots = first_present(regular, "shots", "sog", "shotsOnGoal")
-    pim = first_present(regular, "pim", "penaltyMinutes")
-
-    if games is None and points is None:
-        return None
-
-    try:
-        games_num = int(pd.to_numeric(games, errors="coerce")) if games is not None else 0
-    except Exception:
-        games_num = 0
-
-    try:
-        points_num = int(pd.to_numeric(points, errors="coerce")) if points is not None else 0
-    except Exception:
-        points_num = 0
-
-    return {
-        "Games": games_num if games is not None else None,
-        "Goals": int(pd.to_numeric(goals, errors="coerce")) if goals is not None and pd.notna(pd.to_numeric(goals, errors="coerce")) else None,
-        "Assists": int(pd.to_numeric(assists, errors="coerce")) if assists is not None and pd.notna(pd.to_numeric(assists, errors="coerce")) else None,
-        "Points": points_num if points is not None else None,
-        "Shots": int(pd.to_numeric(shots, errors="coerce")) if shots is not None and pd.notna(pd.to_numeric(shots, errors="coerce")) else None,
-        "PIM": int(pd.to_numeric(pim, errors="coerce")) if pim is not None and pd.notna(pd.to_numeric(pim, errors="coerce")) else None,
-        "PPG": round(points_num / games_num, 2) if games_num else None,
-    }
 
 
 def career_totals_from_progression(progress_df):
@@ -447,21 +390,22 @@ def career_totals_from_progression(progress_df):
     return totals
 
 
+def build_player_progression(player_id: int):
+    landing_progression = progression_from_landing(player_id)
+    if not landing_progression.empty:
+        return landing_progression, "seasonTotals"
+    game_log_progression = progression_from_game_logs(player_id)
+    if not game_log_progression.empty:
+        return game_log_progression, "gameLogs"
+    return pd.DataFrame(), "unavailable"
+
+
 def build_progression_chart(current_df, legacy_df, current_name, legacy_name):
-    plot_parts = []
-    if not current_df.empty:
-        left = current_df[["Career Year", "Points"]].copy()
-        left["Player"] = current_name
-        plot_parts.append(left)
-    if not legacy_df.empty:
-        right = legacy_df[["Career Year", "Points"]].copy()
-        right["Player"] = legacy_name
-        plot_parts.append(right)
-
-    if not plot_parts:
-        return None
-
-    plot_df = pd.concat(plot_parts, ignore_index=True)
+    left = current_df[["Career Year", "Points"]].copy()
+    left["Player"] = current_name
+    right = legacy_df[["Career Year", "Points"]].copy()
+    right["Player"] = legacy_name
+    plot_df = pd.concat([left, right], ignore_index=True)
     return alt.Chart(plot_df).mark_line(point=True).encode(
         x=alt.X("Career Year:Q", title="Career Year"),
         y=alt.Y("Points:Q", title="Points"),
@@ -595,7 +539,7 @@ with tab4:
 
 with tab5:
     st.subheader("Career Card + Year-by-Year Comparison")
-    st.caption("Top cards show NHL regular-season career totals only. Compare data is rebuilt from season game logs.")
+    st.caption("Top cards show NHL regular-season career totals only. Compare data uses NHL season totals first, with game-log fallback if needed.")
 
     if not current_player_options:
         st.warning("No current skater options available for comparison.")
@@ -609,49 +553,55 @@ with tab5:
         current_player_id = int(current_player_options[current_name])
         legacy_player_id = int(LEGACY_PLAYERS[legacy_name])
 
-        current_progression = progression_from_game_logs(current_player_id)
-        legacy_progression = progression_from_game_logs(legacy_player_id)
+        current_progression, current_source = build_player_progression(current_player_id)
+        legacy_progression, legacy_source = build_player_progression(legacy_player_id)
 
         current_career = career_totals_from_progression(current_progression)
         legacy_career = career_totals_from_progression(legacy_progression)
 
-        current_progression_ok = not current_progression.empty
-        legacy_progression_ok = not legacy_progression.empty
-
-        if current_career is None:
-            current_career = fallback_career_from_landing(current_player_id)
-        if legacy_career is None:
-            legacy_career = fallback_career_from_landing(legacy_player_id)
-
-        if current_career is None:
-            st.warning(f"Could not load NHL regular-season data for {current_name}.")
-        if legacy_career is None:
-            st.warning(f"Could not load NHL regular-season data for {legacy_name}.")
-
-        if current_career is not None or legacy_career is not None:
+        if current_career is None or legacy_career is None:
+            st.warning("Could not load NHL regular-season career totals for one of the selected players.")
+        else:
             a, b = st.columns(2)
             with a:
-                if current_career is not None:
-                    render_stat_card(current_name, "NHL regular-season career totals so far", current_career)
-                else:
-                    st.info(f"No career totals available for {current_name}.")
+                render_stat_card(current_name, "NHL regular-season career totals so far", current_career)
             with b:
-                if legacy_career is not None:
-                    render_stat_card(legacy_name, "NHL regular-season full career totals", legacy_career)
-                else:
-                    st.info(f"No career totals available for {legacy_name}.")
+                render_stat_card(legacy_name, "NHL regular-season full career totals", legacy_career)
 
-        chart = build_progression_chart(current_progression, legacy_progression, current_name, legacy_name)
-        if chart is not None:
-            st.subheader("Year-by-Year Points by Career Year")
-            st.altair_chart(chart, use_container_width=True)
+            st.info(
+                f"{current_name} season data source: {current_source} | "
+                f"{legacy_name} season data source: {legacy_source}"
+            )
+
+            available_progressions = []
+            if not current_progression.empty:
+                current_plot = current_progression[["Career Year", "Points"]].copy()
+                current_plot["Player"] = current_name
+                available_progressions.append(current_plot)
+            if not legacy_progression.empty:
+                legacy_plot = legacy_progression[["Career Year", "Points"]].copy()
+                legacy_plot["Player"] = legacy_name
+                available_progressions.append(legacy_plot)
+
+            if available_progressions:
+                st.subheader("Year-by-Year Points by Career Year")
+                plot_df = pd.concat(available_progressions, ignore_index=True)
+                chart = alt.Chart(plot_df).mark_line(point=True).encode(
+                    x=alt.X("Career Year:Q", title="Career Year"),
+                    y=alt.Y("Points:Q", title="Points"),
+                    color=alt.Color("Player:N", title="Player"),
+                    tooltip=["Player", "Career Year", "Points"],
+                )
+                st.altair_chart(chart, use_container_width=True)
+            else:
+                st.info("No season-by-season progression data was available for the selected players.")
 
             display_frames = []
-            if current_progression_ok:
+            if not current_progression.empty:
                 current_display = current_progression[["Career Year", "Season", "Games", "Goals", "Assists", "Points", "PPG"]].copy()
                 current_display["Player"] = current_name
                 display_frames.append(current_display)
-            if legacy_progression_ok:
+            if not legacy_progression.empty:
                 legacy_display = legacy_progression[["Career Year", "Season", "Games", "Goals", "Assists", "Points", "PPG"]].copy()
                 legacy_display["Player"] = legacy_name
                 display_frames.append(legacy_display)
@@ -662,17 +612,10 @@ with tab5:
                 st.subheader("Season-by-Season Breakdown")
                 st.dataframe(combined, use_container_width=True)
 
-            if not (current_progression_ok and legacy_progression_ok):
-                st.info("One player is using fallback season totals, so the chart may be missing some game-log detail. The graph still shows whatever valid year-by-year data was returned.")
-        else:
-            st.info("No season-by-season NHL regular-season data was returned for either player.")
-
-        with st.expander("Compare debug (optional)"):
-            st.write("Current progression rows:", current_progression)
-            st.write("Legacy progression rows:", legacy_progression)
-            st.write("Current progression source:", "game logs / season totals" if current_progression_ok else "career totals fallback only")
-            st.write("Legacy progression source:", "game logs / season totals" if legacy_progression_ok else "career totals fallback only")
-            st.write("Current career totals:", current_career)
-            st.write("Legacy career totals:", legacy_career)
+            with st.expander("Compare debug (optional)"):
+                st.write("Current season data source:", current_source)
+                st.write("Legacy season data source:", legacy_source)
+                st.write("Current progression rows:", current_progression)
+                st.write("Legacy progression rows:", legacy_progression)
 
 st.caption(f"Last refreshed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
