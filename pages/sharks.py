@@ -271,6 +271,27 @@ def parse_game_log_rows(game_log_json):
     return rows
 
 
+def row_contains_nhl_league(row):
+    candidate_keys = [
+        "leagueAbbrev", "leagueAbbreviation", "leagueCode", "league", "leagueName"
+    ]
+    values = []
+    for key in candidate_keys:
+        value = row.get(key)
+        if isinstance(value, dict):
+            value = first_present(value, "default", "en")
+        if value is not None:
+            values.append(str(value).strip())
+
+    lowered = [v.lower() for v in values if v]
+    if lowered:
+        return any("nhl" == v or "nhl" in v for v in lowered)
+
+    # Some seasonTotals rows do not expose league info. In that case, treat the
+    # row as usable and let later season selection logic choose the best row.
+    return True
+
+
 def season_ids_from_landing(landing_json):
     ids = []
     for row in landing_json.get("seasonTotals", []) if landing_json else []:
@@ -278,6 +299,8 @@ def season_ids_from_landing(landing_json):
             continue
         game_type = first_present(row, "gameTypeId", "gameType")
         if game_type not in [2, "2"]:
+            continue
+        if not row_contains_nhl_league(row):
             continue
         season_id = first_present(row, "season", "seasonId")
         if season_id is not None:
@@ -325,6 +348,8 @@ def progression_from_landing(player_id: int):
 
         game_type = first_present(row, "gameTypeId", "gameType")
         if game_type not in [2, "2"]:
+            continue
+        if not row_contains_nhl_league(row):
             continue
 
         season_id = first_present(row, "season", "seasonId")
